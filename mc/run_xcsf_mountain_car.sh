@@ -1,0 +1,62 @@
+#!/bin/bash
+xcsf_pred_strat="linear"
+xcsf_pop_size=7500
+xcsf_beta=0.1
+xcsf_alpha=0.1
+xcsf_epsilon_nought=0.1
+xcsf_nu=5
+xcsf_gamma=1.0
+xcsf_theta_ga=50
+xcsf_tau=0.4
+xcsf_chi=0.8
+xcsf_upsilon=0.5
+xcsf_mu=0.05
+xcsf_theta_del=50
+xcsf_delta=0.1
+xcsf_theta_sub=50
+xcsf_r_nought=0.2
+xcsf_weight_i_min=0
+xcsf_weight_i_max=0
+xcsf_epsilon_i=0.001
+xcsf_fitness_i=0.001
+xcsf_m_nought=0.1
+xcsf_x_nought=1.0
+xcsf_delta_rls=100
+xcsf_tau_rls=0
+xcsf_p_explr=0.1
+num_train_steps=2000000
+num_test_rollouts=10
+monitor_freq=25000
+
+for xcsf_seed in {0..4}; do
+   echo sbatch xcsf_mountain_car.sh \
+        "$xcsf_seed" \
+        "$xcsf_pred_strat" \
+        "$xcsf_pop_size" \
+        "$xcsf_beta" \
+        "$xcsf_alpha" \
+        "$xcsf_epsilon_nought" \
+        "$xcsf_nu" \
+        "$xcsf_gamma" \
+        "$xcsf_theta_ga" \
+        "$xcsf_tau" \
+        "$xcsf_chi" \
+        "$xcsf_upsilon" \
+        "$xcsf_mu" \
+        "$xcsf_theta_del" \
+        "$xcsf_delta" \
+        "$xcsf_theta_sub" \
+        "$xcsf_r_nought" \
+        "$xcsf_weight_i_min" \
+        "$xcsf_weight_i_max" \
+        "$xcsf_epsilon_i" \
+        "$xcsf_fitness_i" \
+        "$xcsf_m_nought" \
+        "$xcsf_x_nought" \
+        "$xcsf_delta_rls" \
+        "$xcsf_tau_rls" \
+        "$xcsf_p_explr" \
+        "$num_train_steps" \
+        "$num_test_rollouts" \
+        "$monitor_freq"
+done
