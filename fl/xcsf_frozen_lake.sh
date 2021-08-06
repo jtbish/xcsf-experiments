@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=batch
+#SBATCH --partition=coursework
 #SBATCH --cpus-per-task=1
 
 source ~/virtualenvs/xcsf/bin/activate
@@ -7,8 +7,8 @@ python3 xcsf_frozen_lake.py \
     --experiment-name="$SLURM_JOB_ID" \
     --fl-grid-size="$1" \
     --fl-slip-prob="$2" \
-    --fl-tl-mult="$3" \
-    --xcsf-pred-strat="$4" \
+    --xcsf-pred-strat="$3" \
+    --xcsf-poly-order="$4" \
     --xcsf-seed="$5" \
     --xcsf-pop-size="$6" \
     --xcsf-beta-epsilon="$7" \
@@ -36,7 +36,9 @@ python3 xcsf_frozen_lake.py \
     --xcsf-do-ga-subsumption \
     --xcsf-delta-rls="${29}" \
     --xcsf-tau-rls="${30}" \
-    --xcsf-p-explr="${31}"\
-    --num-test-rollouts="${32}" \
-    --monitor-steps="${33}"
+    --xcsf-lambda-rls="${31}" \
+    --xcsf-eta="${32}" \
+    --xcsf-p-explr="${33}"\
+    --num-test-rollouts="${34}" \
+    --monitor-steps="${35}"
 mv "slurm-${SLURM_JOB_ID}.out" "${SLURM_JOB_ID}/"

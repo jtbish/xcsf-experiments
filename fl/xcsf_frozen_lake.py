@@ -13,7 +13,8 @@ import numpy as np
 from xcsfrl.encoding import IntegerUnorderedBoundEncoding
 from xcsfrl.xcsf import XCSF
 from xcsfrl.action_selection import FixedEpsilonGreedy
-from xcsfrl.prediction import LinearPrediction, QuadraticPrediction
+from xcsfrl.prediction import (RecursiveLeastSquaresPrediction,
+                               NormalisedLeastMeanSquaresPrediction)
 from rlenvs.frozen_lake import make_frozen_lake_env as make_fl
 from rlenvs.environment import assess_perf
 import __main__
@@ -31,8 +32,8 @@ def parse_args():
     parser.add_argument("--experiment-name", required=True)
     parser.add_argument("--fl-grid-size", type=int, required=True)
     parser.add_argument("--fl-slip-prob", type=float, required=True)
-    parser.add_argument("--fl-tl-mult", type=int, required=True)
     parser.add_argument("--xcsf-pred-strat", required=True)
+    parser.add_argument("--xcsf-poly-order", type=int, required=True)
     parser.add_argument("--xcsf-seed", type=int, required=True)
     parser.add_argument("--xcsf-pop-size", type=int, required=True)
     parser.add_argument("--xcsf-beta-epsilon", type=float, required=True)
@@ -59,8 +60,10 @@ def parse_args():
     parser.add_argument("--xcsf-x-nought", type=float, required=True)
     parser.add_argument("--xcsf-do-ga-subsumption", action="store_true")
     parser.add_argument("--xcsf-do-as-subsumption", action="store_true")
-    parser.add_argument("--xcsf-delta-rls", type=float, required=True)
-    parser.add_argument("--xcsf-tau-rls", type=int, required=True)
+    parser.add_argument("--xcsf-delta-rls", type=float, default=None)
+    parser.add_argument("--xcsf-tau-rls", type=int, default=None)
+    parser.add_argument("--xcsf-lambda-rls", type=float, default=None)
+    parser.add_argument("--xcsf-eta", type=float, default=None)
     parser.add_argument("--xcsf-p-explr", type=float, required=True)
     parser.add_argument("--num-test-rollouts", type=int, required=True)
     parser.add_argument("--monitor-steps", required=True)
@@ -104,15 +107,17 @@ def main(args):
         "do_as_subsumption": args.xcsf_do_as_subsumption,
         "delta_rls": args.xcsf_delta_rls,
         "tau_rls": args.xcsf_tau_rls,
+        "lambda_rls": args.xcsf_lambda_rls,
+        "eta": args.xcsf_eta,
         "p_explr": args.xcsf_p_explr
     }
     logging.info(xcsf_hyperparams)
     encoding = IntegerUnorderedBoundEncoding(train_env.obs_space)
     action_selection_strat = FixedEpsilonGreedy(train_env.action_space)
-    if args.xcsf_pred_strat == "linear":
-        pred_strat = LinearPrediction()
-    elif args.xcsf_pred_strat == "quadratic":
-        pred_strat = QuadraticPrediction()
+    if args.xcsf_pred_strat == "rls":
+        pred_strat = RecursiveLeastSquaresPrediction(args.xcsf_poly_order)
+    elif args.xcsf_pred_strat == "nlms":
+        pred_strat = NormalisedLeastMeanSquaresPrediction(args.xcsf_poly_order)
     else:
         assert False
     xcsf = XCSF(train_env, encoding, action_selection_strat, pred_strat,
@@ -124,24 +129,44 @@ def main(args):
     logging.info(f"Monitor steps: {monitor_steps}")
     logging.info(f"Training step sizes: {training_step_sizes}")
 
-    xcsf_history = {}
     q_hat_mae_history = {}
     perf_history = {}
     steps_done = 0
     for training_step_size in training_step_sizes:
         xcsf.train(num_steps=training_step_size)
         steps_done += training_step_size
-        xcsf_history[steps_done] = copy.deepcopy(xcsf)
+        _save_xcsf(save_path, copy.deepcopy(xcsf), steps_done)
 
         pop = xcsf.pop
-        avg_error = sum([clfr.error * clfr.numerosity for clfr in
-                        pop]) / pop.num_micros
         logging.info(f"\nAfter {steps_done} time steps")
         logging.info(f"Num macros: {pop.num_macros}")
         logging.info(f"Num micros: {pop.num_micros}")
-        actual_micros = sum([clfr.numerosity for clfr in pop])
-        logging.info(f"Actual num micros via numer loop: {actual_micros}")
-        logging.info(f"Avg error: {avg_error}")
+        ratio = pop.num_micros / pop.num_macros
+        logging.info(f"Micro:macro ratio: {ratio:.4f}")
+
+        errors = [clfr.error for clfr in pop]
+        min_error = min(errors)
+        avg_error = sum([clfr.error * clfr.numerosity for clfr in
+                        pop]) / pop.num_micros
+        median_error = np.median(errors)
+        max_error = max(errors)
+        logging.info(f"Min error: {min_error}")
+        logging.info(f"Mean error: {avg_error}")
+        logging.info(f"Median error: {median_error}")
+        logging.info(f"Max error: {max_error}")
+
+        numerosities = [clfr.numerosity for clfr in pop]
+        logging.info(f"Min numerosity: {min(numerosities)}")
+        logging.info(f"Mean numerosity: {np.mean(numerosities)}")
+        logging.info(f"Median numerosity: {np.median(numerosities)}")
+        logging.info(f"Max numerosity: {max(numerosities)}")
+
+        generalities = [clfr.condition.generality for clfr in pop]
+        logging.info(f"Min generality: {min(generalities)}")
+        logging.info(f"Mean generality: {np.mean(generalities)}")
+        logging.info(f"Median generality: {np.median(generalities)}")
+        logging.info(f"Max generality: {max(generalities)}")
+
         logging.info(f"Pop ops history: {pop.ops_history}")
 
         try:
@@ -159,7 +184,7 @@ def main(args):
     last_monitor_step = monitor_steps[-1]
     assert steps_done == last_monitor_step
 
-    _save_data(save_path, xcsf_history, q_hat_mae_history, perf_history)
+    _save_histories(save_path, q_hat_mae_history, perf_history)
     _save_python_env_info(save_path)
     _save_main_py_script(save_path)
 
@@ -181,7 +206,6 @@ def _make_train_env(args):
     return make_fl(grid_size=args.fl_grid_size,
                    slip_prob=args.fl_slip_prob,
                    iod_strat="uniform_rand",
-                   time_limit_mult=args.fl_tl_mult,
                    seed=_FL_SEED)
 
 
@@ -197,7 +221,6 @@ def _make_test_env(args):
     return make_fl(grid_size=args.fl_grid_size,
                    slip_prob=args.fl_slip_prob,
                    iod_strat=iod_strat,
-                   time_limit_mult=args.fl_tl_mult,
                    seed=_FL_SEED)
 
 
@@ -285,9 +308,12 @@ def _assess_perf(test_env, xcsf, args):
                        gamma=args.xcsf_gamma)
 
 
-def _save_data(save_path, xcsf_history, q_hat_mae_history, perf_history):
-    with open(save_path / "xcsf_history.pkl", "wb") as fp:
-        pickle.dump(xcsf_history, fp)
+def _save_xcsf(save_path, xcsf, steps_done):
+    with open(save_path / f"xcsf_ts_{steps_done}.pkl", "wb") as fp:
+        pickle.dump(xcsf, fp)
+
+
+def _save_histories(save_path, q_hat_mae_history, perf_history):
     with open(save_path / "q_hat_mae_history.pkl", "wb") as fp:
         pickle.dump(q_hat_mae_history, fp)
     with open(save_path / "perf_history.pkl", "wb") as fp:
