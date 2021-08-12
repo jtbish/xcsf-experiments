@@ -1,9 +1,13 @@
 #!/bin/bash
-fl_grid_size=8
+# variable params
+fl_grid_size=4
 fl_slip_prob=0
+
+# static / calced params
 xcsf_poly_order=1
-xcsf_pop_size=5000
-xcsf_beta_epsilon=0.0
+declare -A xcsf_pop_sizes=( [4]=2000 [8]=4000 [12]=6000 [16]=8000 )
+xcsf_pop_size="${xcsf_pop_sizes[$fl_grid_size]}"
+xcsf_beta_epsilon=$(python3 -c "print('0') if $fl_slip_prob == 0 else print('0.05')")
 xcsf_beta=0.1
 xcsf_alpha=0.1
 xcsf_epsilon_nought=0.01
@@ -27,21 +31,23 @@ xcsf_m_nought=$(( $fl_grid_size / 4 ))
 xcsf_x_nought=10
 xcsf_p_explr=0.5
 
-xcsf_pred_strat="nlms"
+xcsf_pred_strat="rls"
 xcsf_delta_rls=10
+# if tau_rls > 0, lambda_rls should == 1
+# if lambda_rls < 1, tau_rls should == 0
+# i.e. use one or the other
 xcsf_tau_rls=0
-xcsf_lambda_rls=0.99
+xcsf_lambda_rls=0.995
 xcsf_eta=0.1
 
-# si sizes:
-# 4x4 num frozen = 11
-# 8x8 num frozen = 53
-# 12x12 num frozen = 114
-# 16x16 num frozen = 203
-si_size=53
-tests_per_si=1
+declare -A si_sizes=( [4]=11 [8]=53 [12]=114 [16]=203 )
+si_size="${si_sizes[$fl_grid_size]}"
+# 1 test per si for deterministic, 10 for stochastic
+tests_per_si=$(python3 -c "print('1') if $fl_slip_prob == 0 else print('10')")
 num_test_rollouts=$(( $si_size * $tests_per_si ))
-monitor_steps=$(python3 -c 'print(",".join([str(i*10000) for i in range(1,25+1)]))')
+#monitor_steps=$(python3 -c 'print(",".join([str(i*10000) for i in range(1,50+1)]))')
+epochs_txt="$HOME/ppl-experiments/fl/gs_${fl_grid_size}_pslip_${fl_slip_prob}_popsizex_2/epochs.txt"
+monitor_steps=$(cat $epochs_txt)
 
 for xcsf_seed in {0..0}; do
    echo sbatch xcsf_frozen_lake.sh \
