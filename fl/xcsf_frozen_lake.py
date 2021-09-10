@@ -21,6 +21,12 @@ import __main__
 
 _FL_SEED = 0
 _NUM_CPUS = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
+_IOD_STRAT_TRAIN = "uniform_rand"
+_IOD_STRAT_TEST_DETERMINISTIC = "frozen_no_repeat"
+_IOD_STRAT_TEST_STOCHASTIC = "frozen_repeat"
+_ROLLS_PER_SI_TEST_DETERMINISTIC = 1
+_ROLLS_PER_SI_TEST_STOCHASTIC = 30
+_SI_SIZES = {4: 11, 8: 53, 12: 114, 16: 203}
 
 
 class NullPredictionError(Exception):
@@ -65,8 +71,8 @@ def parse_args():
     parser.add_argument("--xcsf-lambda-rls", type=float, default=None)
     parser.add_argument("--xcsf-eta", type=float, default=None)
     parser.add_argument("--xcsf-p-explr", type=float, required=True)
-    parser.add_argument("--num-test-rollouts", type=int, required=True)
-    parser.add_argument("--monitor-steps", required=True)
+    parser.add_argument("--monitor-freq-episodes", type=int, required=True)
+    parser.add_argument("--monitor-num-ticks", type=int, required=True)
     return parser.parse_args()
 
 
@@ -77,6 +83,18 @@ def main(args):
 
     train_env = _make_train_env(args)
     test_env = _make_test_env(args)
+    si_size = _SI_SIZES[args.fl_grid_size]
+    if args.fl_slip_prob == 0:
+        num_test_rollouts = (si_size * _ROLLS_PER_SI_TEST_DETERMINISTIC)
+        logging.info(f"Num test rollouts = {si_size} * "
+                     f"{_ROLLS_PER_SI_TEST_DETERMINISTIC} = "
+                     f"{num_test_rollouts}")
+    elif 0 < args.fl_slip_prob < 1:
+        num_test_rollouts = (si_size * _ROLLS_PER_SI_TEST_STOCHASTIC)
+        logging.info(f"Num test rollouts = {si_size} * "
+                     f"{_ROLLS_PER_SI_TEST_STOCHASTIC} = {num_test_rollouts}")
+    else:
+        assert False
 
     xcsf_hyperparams = {
         "seed": args.xcsf_seed,
@@ -124,21 +142,20 @@ def main(args):
                 xcsf_hyperparams)
 
     q = _load_q_npy(args)
-    monitor_steps = _parse_monitor_steps_str(args.monitor_steps)
-    training_step_sizes = _calc_training_step_sizes(monitor_steps)
-    logging.info(f"Monitor steps: {monitor_steps}")
-    logging.info(f"Training step sizes: {training_step_sizes}")
-
     q_hat_mae_history = {}
     perf_history = {}
-    steps_done = 0
-    for training_step_size in training_step_sizes:
-        xcsf.train(num_steps=training_step_size)
-        steps_done += training_step_size
-        _save_xcsf(save_path, copy.deepcopy(xcsf), steps_done)
+
+    assert args.monitor_freq_episodes >= 1
+    episode_batch_size = args.monitor_freq_episodes
+    assert args.monitor_num_ticks >= 1
+    episodes_done = 0
+    for _ in range(args.monitor_num_ticks):
+        xcsf.train_for_episodes(num_episodes=episode_batch_size)
+        episodes_done += episode_batch_size
+        _save_xcsf(save_path, copy.deepcopy(xcsf), episodes_done)
 
         pop = xcsf.pop
-        logging.info(f"\nAfter {steps_done} time steps")
+        logging.info(f"\nAfter {episodes_done} episodes")
         logging.info(f"Num macros: {pop.num_macros}")
         logging.info(f"Num micros: {pop.num_micros}")
         ratio = pop.num_micros / pop.num_macros
@@ -175,14 +192,14 @@ def main(args):
         except NullPredictionError:
             q_hat_mae = None
             logging.info(f"Holes in q_hat")
-        q_hat_mae_history[steps_done] = q_hat_mae
+        q_hat_mae_history[episodes_done] = q_hat_mae
 
-        perf = _assess_perf(test_env, xcsf, args)
-        perf_history[steps_done] = perf
+        perf = _assess_perf(test_env, xcsf, num_test_rollouts, args.xcsf_gamma)
+        perf_history[episodes_done] = perf
         logging.info(f"Perf = {perf}")
 
-    last_monitor_step = monitor_steps[-1]
-    assert steps_done == last_monitor_step
+    assert episodes_done == \
+        (args.monitor_freq_episodes * args.monitor_num_ticks)
 
     _save_histories(save_path, q_hat_mae_history, perf_history)
     _save_python_env_info(save_path)
@@ -202,20 +219,18 @@ def _setup_logging(save_path):
 
 
 def _make_train_env(args):
-    # training always use uniform rand initial obss
     return make_fl(grid_size=args.fl_grid_size,
                    slip_prob=args.fl_slip_prob,
-                   iod_strat="uniform_rand",
+                   iod_strat=_IOD_STRAT_TRAIN,
                    seed=_FL_SEED)
 
 
 def _make_test_env(args):
-    # testing uses non-repeated/repeated frozen obss dependent on slip prob
     slip_prob = args.fl_slip_prob
     if slip_prob == 0:
-        iod_strat = "frozen_no_repeat"
+        iod_strat = _IOD_STRAT_TEST_DETERMINISTIC
     elif 0 < slip_prob < 1:
-        iod_strat = "frozen_repeat"
+        iod_strat = _IOD_STRAT_TEST_STOCHASTIC
     else:
         assert False
     return make_fl(grid_size=args.fl_grid_size,
@@ -231,31 +246,6 @@ def _load_q_npy(args):
     q_npy_path = \
         f"q_npy/FrozenLake{gs}x{gs}-v0_gamma_{gm}_slip_prob_{sp:.2f}_Qstar.npy"
     return np.load(q_npy_path)
-
-
-def _parse_monitor_steps_str(monitor_steps_str):
-    """Monitor steps are comma sepd list of ints that specify time steps at
-    which to measure error & perf of model."""
-    monitor_steps = [int(elem) for elem in monitor_steps_str.split(",")]
-    # check all steps positive and increasing
-    for idx in range(0, len(monitor_steps)):
-        assert monitor_steps[idx] > 0
-        if idx != 0:
-            assert monitor_steps[idx] > monitor_steps[idx-1]
-    return monitor_steps
-
-
-def _calc_training_step_sizes(monitor_steps):
-    # monitor steps are *absolute* training step checkpoints, so need to calc
-    # the *relative* chunk sizes between them, first one taken literally since
-    # relative to zero.
-    training_step_sizes = [monitor_steps[0]]
-    for idx in range(1, len(monitor_steps)):
-        delta = (monitor_steps[idx] - monitor_steps[idx-1])
-        assert delta > 0
-        training_step_sizes.append(delta)
-    assert len(training_step_sizes) == len(monitor_steps)
-    return training_step_sizes
 
 
 def _calc_q_hat_mae(q, env, xcsf):
@@ -301,15 +291,15 @@ def _calc_q_hat_mae(q, env, xcsf):
         raise NullPredictionError
 
 
-def _assess_perf(test_env, xcsf, args):
+def _assess_perf(test_env, xcsf, num_test_rollouts, gamma):
     return assess_perf(env=test_env,
                        policy=xcsf,
-                       num_rollouts=args.num_test_rollouts,
-                       gamma=args.xcsf_gamma)
+                       num_rollouts=num_test_rollouts,
+                       gamma=gamma)
 
 
-def _save_xcsf(save_path, xcsf, steps_done):
-    with open(save_path / f"xcsf_ts_{steps_done}.pkl", "wb") as fp:
+def _save_xcsf(save_path, xcsf, episodes_done):
+    with open(save_path / f"xcsf_eps_{episodes_done}.pkl", "wb") as fp:
         pickle.dump(xcsf, fp)
 
 

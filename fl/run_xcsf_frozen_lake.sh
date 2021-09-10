@@ -1,6 +1,6 @@
 #!/bin/bash
 # variable params
-fl_grid_size=4
+fl_grid_size=8
 fl_slip_prob=0
 
 # static / calced params
@@ -14,10 +14,10 @@ xcsf_epsilon_nought=0.01
 xcsf_nu=5
 xcsf_gamma=0.95
 xcsf_theta_ga=50
-xcsf_tau=0.5
+xcsf_tau=0.4
 xcsf_chi=0.8
 xcsf_upsilon=0.5
-xcsf_mu=0.05
+xcsf_mu=0.04
 xcsf_theta_del=50
 xcsf_delta=0.1
 xcsf_theta_sub=50
@@ -37,17 +37,11 @@ xcsf_delta_rls=10
 # if lambda_rls < 1, tau_rls should == 0
 # i.e. use one or the other
 xcsf_tau_rls=0
-xcsf_lambda_rls=0.995
+xcsf_lambda_rls=0.999
 xcsf_eta=0.1
 
-declare -A si_sizes=( [4]=11 [8]=53 [12]=114 [16]=203 )
-si_size="${si_sizes[$fl_grid_size]}"
-# 1 test per si for deterministic, 10 for stochastic
-tests_per_si=$(python3 -c "print('1') if $fl_slip_prob == 0 else print('10')")
-num_test_rollouts=$(( $si_size * $tests_per_si ))
-#monitor_steps=$(python3 -c 'print(",".join([str(i*10000) for i in range(1,50+1)]))')
-epochs_txt="$HOME/ppl-experiments/fl/gs_${fl_grid_size}_pslip_${fl_slip_prob}_popsizex_2/epochs.txt"
-monitor_steps=$(cat $epochs_txt)
+monitor_freq_episodes=500
+monitor_num_ticks=20
 
 for xcsf_seed in {0..0}; do
    echo sbatch xcsf_frozen_lake.sh \
@@ -84,6 +78,6 @@ for xcsf_seed in {0..0}; do
         "$xcsf_lambda_rls" \
         "$xcsf_eta" \
         "$xcsf_p_explr" \
-        "$num_test_rollouts" \
-        "$monitor_steps"
+        "$monitor_freq_episodes" \
+        "$monitor_num_ticks"
 done

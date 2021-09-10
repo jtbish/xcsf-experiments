@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=coursework
+#SBATCH --partition=batch
 #SBATCH --cpus-per-task=1
 
 source ~/virtualenvs/xcsf/bin/activate
@@ -39,6 +39,6 @@ python3 xcsf_frozen_lake.py \
     --xcsf-lambda-rls="${31}" \
     --xcsf-eta="${32}" \
     --xcsf-p-explr="${33}"\
-    --num-test-rollouts="${34}" \
-    --monitor-steps="${35}"
+    --monitor-freq-episodes="${34}" \
+    --monitor-num-ticks="${35}"
 mv "slurm-${SLURM_JOB_ID}.out" "${SLURM_JOB_ID}/"
