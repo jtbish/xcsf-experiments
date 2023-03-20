@@ -1,36 +1,51 @@
 #!/usr/bin/python3
 import argparse
+import copy
+import glob
 import logging
 import os
 import pickle
 import shutil
 import subprocess
-import copy
 import time
 from pathlib import Path
 
-import numpy as np
-from xcsfrl.encoding import IntegerUnorderedBoundEncoding
-from xcsfrl.xcsf import XCSF
-from xcsfrl.action_selection import FixedEpsilonGreedy
-from xcsfrl.prediction import (RecursiveLeastSquaresPrediction,
-                               NormalisedLeastMeanSquaresPrediction)
-from rlenvs.frozen_lake import make_frozen_lake_env as make_fl
-from rlenvs.environment import assess_perf
 import __main__
+import numpy as np
+from rlenvs.environment import assess_perf
+from rlenvs.frozen_lake import make_frozen_lake_env as make_fl
+from xcsfrl.action_selection import FixedEpsilonGreedy
+from xcsfrl.encoding import IntegerUnorderedBoundEncoding
+from xcsfrl.prediction import (NormalisedLeastMeanSquaresPrediction,
+                               RecursiveLeastSquaresPrediction)
+from xcsfrl.xcsf import XCSF
 
 _FL_SEED = 0
 _NUM_CPUS = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
-_IOD_STRAT_TRAIN = "uniform_rand"
-_IOD_STRAT_TEST_DETERMINISTIC = "frozen_no_repeat"
-_IOD_STRAT_TEST_STOCHASTIC = "frozen_repeat"
 _ROLLS_PER_SI_TEST_DETERMINISTIC = 1
 _ROLLS_PER_SI_TEST_STOCHASTIC = 30
-_SI_SIZES = {4: 11, 8: 53, 12: 114, 16: 203}
 
 
 class NullPredictionError(Exception):
     pass
+
+
+class XCSFCachedPolicy:
+    """Cached policy for XCSF over given set of observations."""
+    def __init__(self, xcsf, obss):
+        self._policy_cache = self._make_policy_cache(xcsf, obss)
+
+    def _make_policy_cache(self, xcsf, obss):
+        policy_cache = {}
+        for obs in obss:
+            action = xcsf.select_action(obs)
+            obs_hashable = tuple(obs)
+            policy_cache[obs_hashable] = action
+        return policy_cache
+
+    def select_action(self, obs):
+        obs_hashable = tuple(obs)
+        return self._policy_cache[obs_hashable]
 
 
 def parse_args():
@@ -38,6 +53,8 @@ def parse_args():
     parser.add_argument("--experiment-name", required=True)
     parser.add_argument("--fl-grid-size", type=int, required=True)
     parser.add_argument("--fl-slip-prob", type=float, required=True)
+    parser.add_argument("--fl-iod-strat-base-train", required=True)
+    parser.add_argument("--fl-iod-strat-base-test", required=True)
     parser.add_argument("--xcsf-pred-strat", required=True)
     parser.add_argument("--xcsf-poly-order", type=int, required=True)
     parser.add_argument("--xcsf-seed", type=int, required=True)
@@ -71,7 +88,7 @@ def parse_args():
     parser.add_argument("--xcsf-lambda-rls", type=float, default=None)
     parser.add_argument("--xcsf-eta", type=float, default=None)
     parser.add_argument("--xcsf-p-explr", type=float, required=True)
-    parser.add_argument("--monitor-freq-episodes", type=int, required=True)
+    parser.add_argument("--monitor-freq-ga-calls", type=int, required=True)
     parser.add_argument("--monitor-num-ticks", type=int, required=True)
     return parser.parse_args()
 
@@ -81,20 +98,41 @@ def main(args):
     _setup_logging(save_path)
     logging.info(str(args))
 
-    train_env = _make_train_env(args)
-    test_env = _make_test_env(args)
-    si_size = _SI_SIZES[args.fl_grid_size]
     if args.fl_slip_prob == 0:
-        num_test_rollouts = (si_size * _ROLLS_PER_SI_TEST_DETERMINISTIC)
-        logging.info(f"Num test rollouts = {si_size} * "
-                     f"{_ROLLS_PER_SI_TEST_DETERMINISTIC} = "
-                     f"{num_test_rollouts}")
+        is_deterministic = True
     elif 0 < args.fl_slip_prob < 1:
-        num_test_rollouts = (si_size * _ROLLS_PER_SI_TEST_STOCHASTIC)
-        logging.info(f"Num test rollouts = {si_size} * "
-                     f"{_ROLLS_PER_SI_TEST_STOCHASTIC} = {num_test_rollouts}")
+        is_deterministic = False
     else:
         assert False
+
+    # train always uses uniform rand sampling
+    iod_strat_train = args.fl_iod_strat_base_train + "_uniform_rand"
+    if is_deterministic:
+        iod_strat_test = args.fl_iod_strat_base_test + "_no_repeat"
+    else:
+        iod_strat_test = args.fl_iod_strat_base_test + "_repeat"
+    train_env = _make_env(args, iod_strat_train)
+    test_env = _make_env(args, iod_strat_test)
+    # q hat mae env is same as test but always no repeat
+    iod_strat_q_hat_mae = args.fl_iod_strat_base_test + "_no_repeat"
+    q_hat_mae_env = _make_env(args, iod_strat_q_hat_mae)
+
+    assert test_env.si_size == q_hat_mae_env.si_size
+    test_si_size = test_env.si_size
+    logging.info(f"Training on iod strat: {iod_strat_train}")
+    logging.info(f"Testing on iod strat: {iod_strat_test}")
+    logging.info(f"Measuring Qhat MAE on iod strat: {iod_strat_q_hat_mae}")
+    logging.info(f"Test si size = {test_si_size}")
+
+    if is_deterministic:
+        num_test_rollouts = (test_si_size * _ROLLS_PER_SI_TEST_DETERMINISTIC)
+        logging.info(f"Num test rollouts = {test_si_size} * "
+                     f"{_ROLLS_PER_SI_TEST_DETERMINISTIC} = "
+                     f"{num_test_rollouts}")
+    else:
+        num_test_rollouts = (test_si_size * _ROLLS_PER_SI_TEST_STOCHASTIC)
+        logging.info(f"Num test rollouts = {test_si_size} * "
+                     f"{_ROLLS_PER_SI_TEST_STOCHASTIC} = {num_test_rollouts}")
 
     xcsf_hyperparams = {
         "seed": args.xcsf_seed,
@@ -145,17 +183,20 @@ def main(args):
     q_hat_mae_history = {}
     perf_history = {}
 
-    assert args.monitor_freq_episodes >= 1
-    episode_batch_size = args.monitor_freq_episodes
+    assert args.monitor_freq_ga_calls >= 1
+    train_batch_size = args.monitor_freq_ga_calls
     assert args.monitor_num_ticks >= 1
-    episodes_done = 0
+    logging.info(f"Training for {train_batch_size} * "
+                 f"{args.monitor_num_ticks} = "
+                 f"{train_batch_size*args.monitor_num_ticks} num GA calls")
+    ga_calls_done = 0
     for _ in range(args.monitor_num_ticks):
-        xcsf.train_for_episodes(num_episodes=episode_batch_size)
-        episodes_done += episode_batch_size
-        _save_xcsf(save_path, copy.deepcopy(xcsf), episodes_done)
+        xcsf.train_for_ga_calls(num_ga_calls=train_batch_size)
+        ga_calls_done += train_batch_size
+        _save_xcsf(save_path, copy.deepcopy(xcsf), ga_calls_done)
 
         pop = xcsf.pop
-        logging.info(f"\nAfter {episodes_done} episodes")
+        logging.info(f"\nAfter {ga_calls_done} GA calls")
         logging.info(f"Num macros: {pop.num_macros}")
         logging.info(f"Num micros: {pop.num_micros}")
         ratio = pop.num_micros / pop.num_macros
@@ -163,8 +204,8 @@ def main(args):
 
         errors = [clfr.error for clfr in pop]
         min_error = min(errors)
-        avg_error = sum([clfr.error * clfr.numerosity for clfr in
-                        pop]) / pop.num_micros
+        avg_error = sum([clfr.error * clfr.numerosity
+                         for clfr in pop]) / pop.num_micros
         median_error = np.median(errors)
         max_error = max(errors)
         logging.info(f"Min error: {min_error}")
@@ -187,23 +228,24 @@ def main(args):
         logging.info(f"Pop ops history: {pop.ops_history}")
 
         try:
-            q_hat_mae = _calc_q_hat_mae(q, test_env, xcsf)
+            q_hat_mae = _calc_q_hat_mae(q, xcsf, q_hat_mae_env)
             logging.info(f"q_hat mae = {q_hat_mae}")
         except NullPredictionError:
             q_hat_mae = None
             logging.info(f"Holes in q_hat")
-        q_hat_mae_history[episodes_done] = q_hat_mae
+        q_hat_mae_history[ga_calls_done] = q_hat_mae
 
         perf = _assess_perf(test_env, xcsf, num_test_rollouts, args.xcsf_gamma)
-        perf_history[episodes_done] = perf
+        perf_history[ga_calls_done] = perf
         logging.info(f"Perf = {perf}")
 
-    assert episodes_done == \
-        (args.monitor_freq_episodes * args.monitor_num_ticks)
+    assert ga_calls_done == \
+        (args.monitor_freq_ga_calls * args.monitor_num_ticks)
 
     _save_histories(save_path, q_hat_mae_history, perf_history)
-    _save_python_env_info(save_path)
     _save_main_py_script(save_path)
+#    _compress_xcsf_pkl_files(save_path, args.monitor_num_ticks)
+#    _delete_uncompressed_xcsf_pkl_files(save_path)
 
 
 def _setup_save_path(experiment_name):
@@ -218,21 +260,7 @@ def _setup_logging(save_path):
                         level=logging.DEBUG)
 
 
-def _make_train_env(args):
-    return make_fl(grid_size=args.fl_grid_size,
-                   slip_prob=args.fl_slip_prob,
-                   iod_strat=_IOD_STRAT_TRAIN,
-                   seed=_FL_SEED)
-
-
-def _make_test_env(args):
-    slip_prob = args.fl_slip_prob
-    if slip_prob == 0:
-        iod_strat = _IOD_STRAT_TEST_DETERMINISTIC
-    elif 0 < slip_prob < 1:
-        iod_strat = _IOD_STRAT_TEST_STOCHASTIC
-    else:
-        assert False
+def _make_env(args, iod_strat):
     return make_fl(grid_size=args.fl_grid_size,
                    slip_prob=args.fl_slip_prob,
                    iod_strat=iod_strat,
@@ -248,15 +276,28 @@ def _load_q_npy(args):
     return np.load(q_npy_path)
 
 
-def _calc_q_hat_mae(q, env, xcsf):
-    shape = (env.grid_size, env.grid_size, len(env.action_space))
-    assert q.shape == shape
+def _calc_q_hat_mae(q, xcsf, env):
+    """q is the optimal Q function for given (grid size, slip prob) combo.
+    env is the environment (non-repeat) used for learning that states to
+    compare are determined from"""
+    q_shape = (env.grid_size, env.grid_size, len(env.action_space))
+    assert q.shape == q_shape
+
+    # iterate copy of env to get all starting states out of it
+    env = copy.deepcopy(env)
+    states_to_compare = []
+    while True:
+        try:
+            states_to_compare.append(env.reset())
+        except StopIteration:
+            break
+    assert len(states_to_compare) == env.si_size
 
     # frozen lake state is given by [x, y] pair, q arrs store values in (y, x)
     # fashion, i.e. y component is first dim (row), x component is second dim
     # (column); this is to make the array visually look like the grid.
-    q_hat = np.full(shape, np.nan)
-    for state in env.nonterminal_states:
+    q_hat = np.full(q_shape, np.nan)
+    for state in states_to_compare:
         [x, y] = state
         prediction_arr = xcsf.gen_prediction_arr(state)
         for a in env.action_space:
@@ -266,40 +307,45 @@ def _calc_q_hat_mae(q, env, xcsf):
                 q_idx = tuple([y, x] + [a_idx])
                 q_hat[q_idx] = prediction
 
-    # make a flat list of q_vals for all nonterminal states for both q and
+    # make a flat list of q_vals for all states to compare for both q and
     # q_hat, in order to check if q_hat has any null predictions for
-    # nonterminal states
-    q_nonterm_states_flat = []
-    for state in env.nonterminal_states:
+    # states to compare
+    q_compare_states_flat = []
+    for state in states_to_compare:
         [x, y] = state
         idx = (y, x)
-        q_nonterm_states_flat.extend(list(q[idx]))
-    q_nonterm_states_flat = np.array(q_nonterm_states_flat)
+        q_compare_states_flat.extend(list(q[idx]))
+    q_compare_states_flat = np.array(q_compare_states_flat)
+    assert len(q_compare_states_flat) == \
+        (len(states_to_compare) * len(env.action_space))
 
-    q_hat_nonterm_states_flat = []
-    for state in env.nonterminal_states:
+    q_hat_compare_states_flat = []
+    for state in states_to_compare:
         [x, y] = state
         idx = (y, x)
-        q_hat_nonterm_states_flat.extend(list(q_hat[idx]))
-    q_hat_nonterm_states_flat = np.array(q_hat_nonterm_states_flat)
+        q_hat_compare_states_flat.extend(list(q_hat[idx]))
+    q_hat_compare_states_flat = np.array(q_hat_compare_states_flat)
+    assert len(q_hat_compare_states_flat) == \
+        (len(states_to_compare) * len(env.action_space))
 
-    contains_null_predictions = np.isnan(q_hat_nonterm_states_flat).any()
+    contains_null_predictions = np.isnan(q_hat_compare_states_flat).any()
     if not contains_null_predictions:
-        return np.mean(np.abs(q_nonterm_states_flat -
-                       q_hat_nonterm_states_flat))
+        return np.mean(
+            np.abs(q_compare_states_flat - q_hat_compare_states_flat))
     else:
         raise NullPredictionError
 
 
 def _assess_perf(test_env, xcsf, num_test_rollouts, gamma):
+    policy = XCSFCachedPolicy(xcsf, obss=test_env.nonterminal_states)
     return assess_perf(env=test_env,
-                       policy=xcsf,
+                       policy=policy,
                        num_rollouts=num_test_rollouts,
                        gamma=gamma)
 
 
-def _save_xcsf(save_path, xcsf, episodes_done):
-    with open(save_path / f"xcsf_eps_{episodes_done}.pkl", "wb") as fp:
+def _save_xcsf(save_path, xcsf, ga_calls_done):
+    with open(save_path / f"xcsf_ga_calls_{ga_calls_done}.pkl", "wb") as fp:
         pickle.dump(xcsf, fp)
 
 
@@ -310,18 +356,24 @@ def _save_histories(save_path, q_hat_mae_history, perf_history):
         pickle.dump(perf_history, fp)
 
 
-def _save_python_env_info(save_path):
-    result = subprocess.run(["pip3", "freeze"],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL)
-    return_val = result.stdout.decode("utf-8")
-    with open(save_path / "python_env_info.txt", "w") as fp:
-        fp.write(str(return_val))
-
-
 def _save_main_py_script(save_path):
     main_file_path = Path(__main__.__file__)
     shutil.copy(main_file_path, save_path)
+
+
+def _compress_xcsf_pkl_files(save_path, monitor_num_ticks):
+    xcsf_pkl_files = glob.glob(f"{save_path}/xcsf*.pkl")
+    assert len(xcsf_pkl_files) == monitor_num_ticks
+    os.environ["XZ_OPT"] = "-9e"
+    subprocess.run(["tar", "-cJf", f"{save_path}/xcsfs.tar.xz"] +
+                   xcsf_pkl_files,
+                   check=True)
+
+
+def _delete_uncompressed_xcsf_pkl_files(save_path):
+    xcsf_pkl_files = glob.glob(f"{save_path}/xcsf*.pkl")
+    for file_ in xcsf_pkl_files:
+        os.remove(file_)
 
 
 if __name__ == "__main__":

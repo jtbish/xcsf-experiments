@@ -1,0 +1,16 @@
+cloudpickle==1.6.0
+cycler==0.10.0
+future==0.18.2
+-e git+git@github.com:jtbish/gym.git@fc1b262bb6caf89005558167c44df8b4873dba07#egg=gym
+kiwisolver==1.3.1
+matplotlib==3.3.4
+numpy==1.19.5
+parse==1.19.0
+Pillow==7.2.0
+pyglet==1.5.0
+pyparsing==2.4.7
+python-dateutil==2.8.1
+-e git+git@github.com:jtbish/rlenvs.git@fc1820525cc5563883118d8ec5c809f45e410022#egg=rlenvs
+scipy==1.5.4
+six==1.15.0
+-e git+git@github.com:jtbish/xcsfrl.git@bff59bda237c40429c8bdb3552a05aade48d720d#egg=xcsfrl

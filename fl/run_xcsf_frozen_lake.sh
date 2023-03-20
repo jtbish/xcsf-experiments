@@ -1,11 +1,13 @@
 #!/bin/bash
 # variable params
-fl_grid_size=8
+fl_grid_size=4
 fl_slip_prob=0
+fl_iod_strat_base_train="frozen"
+fl_iod_strat_base_test="frozen"
 
 # static / calced params
 xcsf_poly_order=1
-declare -A xcsf_pop_sizes=( [4]=2000 [8]=4000 [12]=6000 [16]=8000 )
+declare -A xcsf_pop_sizes=( [4]=700 [8]=2100 [12]=4200 )
 xcsf_pop_size="${xcsf_pop_sizes[$fl_grid_size]}"
 xcsf_beta_epsilon=$(python3 -c "print('0') if $fl_slip_prob == 0 else print('0.05')")
 xcsf_beta=0.1
@@ -14,7 +16,7 @@ xcsf_epsilon_nought=0.01
 xcsf_nu=5
 xcsf_gamma=0.95
 xcsf_theta_ga=50
-xcsf_tau=0.4
+xcsf_tau=0.5
 xcsf_chi=0.8
 xcsf_upsilon=0.5
 xcsf_mu=0.04
@@ -37,16 +39,22 @@ xcsf_delta_rls=10
 # if lambda_rls < 1, tau_rls should == 0
 # i.e. use one or the other
 xcsf_tau_rls=0
+#xcsf_rls_mem_len=$(( $xcsf_theta_ga * 10 ))
+#xcsf_lambda_rls=$(bc -l <<< "1 - (1 / $xcsf_rls_mem_len)")
 xcsf_lambda_rls=0.999
+# leftover for nlms pred strat: ignore
 xcsf_eta=0.1
 
-monitor_freq_episodes=500
-monitor_num_ticks=20
+declare -A monitor_freq_ga_callss=( [4]=56 [8]=168 [12]=336 )
+monitor_freq_ga_calls="${monitor_freq_ga_callss[$fl_grid_size]}"
+monitor_num_ticks=400
 
-for xcsf_seed in {0..0}; do
-   echo sbatch xcsf_frozen_lake.sh \
+for xcsf_seed in {0..29}; do
+   sbatch xcsf_frozen_lake.sh \
         "$fl_grid_size" \
         "$fl_slip_prob" \
+        "$fl_iod_strat_base_train" \
+        "$fl_iod_strat_base_test" \
         "$xcsf_pred_strat" \
         "$xcsf_poly_order" \
         "$xcsf_seed" \
@@ -78,6 +86,6 @@ for xcsf_seed in {0..0}; do
         "$xcsf_lambda_rls" \
         "$xcsf_eta" \
         "$xcsf_p_explr" \
-        "$monitor_freq_episodes" \
+        "$monitor_freq_ga_calls" \
         "$monitor_num_ticks"
 done

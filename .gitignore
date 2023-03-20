@@ -3,3 +3,8 @@ slurm*
 63*
 64*
 */__pycache__/
+cp/
+mc/
+*.eps
+*.pdf
+*.png
